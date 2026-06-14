@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <title>WebGIS - Carbon Trading Potential Index (Fix Scroll)</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/proj4@2.9.0/dist/proj4.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        .app { display: flex; height: 100vh; width: 100%; }
+        /* SIDEBAR - SCROLLABLE */
+        .sidebar {
+            width: 380px; background: #1e2a36; color: white;
+            display: flex; flex-direction: column;
+            overflow-y: auto;   /* scroll vertikal */
+            box-shadow: 2px 0 10px rgba(0,0,0,0.3);
+            z-index: 10;
+        }
+        .sidebar-header {
+            padding: 20px; text-align: center;
+            border-bottom: 1px solid rgba(255,255,255,0.2);
+            position: sticky; top: 0; background: #1e2a36; z-index: 2;
+        }
+        .sidebar-content {
+            padding: 15px;
+            flex: 1;
+        }
+        .info-card, .chart-card {
+            background: #2c3e50; margin-bottom: 20px; padding: 15px;
+            border-radius: 12px;
+        }
+        .info-card h3, .chart-card h3 {
+            margin-bottom: 10px; border-left: 3px solid #4caf50; padding-left: 10px;
+            font-size: 1rem;
+        }
+        .detail-content { font-size: 0.85rem; line-height: 1.5; }
+        canvas { 
+            max-height: 200px; 
+            width: 100%; 
+            margin-top: 10px;
+        }
+        /* Pastikan pie chart container tidak terpotong */
+        .chart-card:last-child {
+            margin-bottom: 30px;
+        }
+        .legend {
+            display: flex; flex-wrap: wrap; gap: 10px; margin-top: 15px;
+            background: rgba(0,0,0,0.3); padding: 10px; border-radius: 10px;
+        }
+        .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+        .color-box { width: 14px; height: 14px; border-radius: 3px; }
+        button {
+            background: #ff9800; border: none; padding: 8px 12px; border-radius: 30px;
+            color: white; cursor: pointer; width: 100%; margin-top: 10px;
+            font-weight: bold;
+        }
+        .analysis-text {
+            background: rgba(0,0,0,0.6); padding: 10px; border-radius: 12px;
+            margin-top: 12px; font-size: 12px; display: none;
+        }
+        .footer-note { text-align: center; font-size: 11px; margin-top: 20px; opacity: 0.6; }
+        .map-container { flex: 1; position: relative; }
+        #map { height: 100%; width: 100%; }
+    </style>
+</head>
+<body>
+<div class="app">
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <h2>🌿 WebGIS Karbon Malang</h2>
+            <p style="font-size:12px;">Carbon Trading Potential Index</p>
+        </div>
+        <div class="sidebar-content">
+            <div class="info-card">
+                <h3>📍 Detail Desa</h3>
+                <div class="detail-content" id="selectedDetail">Klik pada peta</div>
+                <button id="analyzeBtn" style="display:none;">📊 Analisis & Rekomendasi</button>
+                <div id="analysisText" class="analysis-text"></div>
+            </div>
+            <div class="chart-card">
+                <h3>📊 Stok Karbon & CO₂ (ton)</h3>
+                <canvas id="emissionChart"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>🌱 AGB (Mg/ha) & NDVI</h3>
+                <canvas id="ndviChart"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>🥧 Distribusi Potensi Karbon</h3>
+                <canvas id="potensiChart"></canvas>
+            </div>
+            <div class="legend">
+                <div class="legend-item"><div class="color-box" style="background:#1b5e20;"></div> Sangat Berpotensi</div>
+                <div class="legend-item"><div class="color-box" style="background:#4caf50;"></div> Berpotensi</div>
+                <div class="legend-item"><div class="color-box" style="background:#ff9800;"></div> Cukup Berpotensi</div>
+                <div class="legend-item"><div class="color-box" style="background:#ffc107;"></div> Kurang Berpotensi</div>
+                <div class="legend-item"><div class="color-box" style="background:#f44336;"></div> Tidak Berpotensi</div>
+            </div>
+            <div class="footer-note">Klik poligon untuk detail & grafik</div>
+        </div>
+    </div>
+    <div class="map-container">
+        <div id="map"></div>
+    </div>
+</div>
+
+<script>
+    // ==================== PROYEKSI ====================
+    proj4.defs("EPSG:32749", "+proj=utm +zone=49 +south +datum=WGS84 +units=m +no_defs");
+    proj4.defs("EPSG:4326", "+proj=longlat +datum=WGS84 +no_defs");
+    
+    function reprojectGeometry(geom) {
+        if (geom.type === "Polygon") {
+            geom.coordinates = geom.coordinates.map(ring => ring.map(c => proj4("EPSG:32749", "EPSG:4326", c)));
+        } else if (geom.type === "MultiPolygon") {
+            geom.coordinates = geom.coordinates.map(poly => poly.map(ring => ring.map(c => proj4("EPSG:32749", "EPSG:4326", c))));
+        }
+        return geom;
+    }
+
+    function getColor(kelas) {
+        if (kelas === 'SANGAT BERPOTENSI') return '#1b5e20';
+        if (kelas === 'BERPOTENSI') return '#4caf50';
+        if (kelas === 'CUKUP BERPOTENSI') return '#ff9800';
+        if (kelas === 'KURANG BERPOTENSI') return '#ffc107';
+        if (kelas === 'TIDAK BERPOTENSI') return '#f44336';
+        return '#888';
+    }
+
+    let map, emissionChart, ndviChart, potensiChart;
+    let geoJsonData, currentFeature = null;
+    const analyzeBtn = document.getElementById('analyzeBtn');
+    const analysisDiv = document.getElementById('analysisText');
+
+    function formatRupiah(num) {
+        if (!num) return 'Rp 0';
+        if (num >= 1e9) return 'Rp ' + (num / 1e9).toFixed(2) + ' Miliar';
+        return 'Rp ' + Math.round(num).toLocaleString('id-ID');
+    }
+
+    function updateCharts(feature) {
+        currentFeature = feature;
+        analyzeBtn.style.display = 'block';
+        analysisDiv.style.display = 'none';
+        const p = feature.properties;
+        const carbonTon = (p.TOTAL_CARB || 0) / 1000;
+        const co2Ton = (p.TOTAL_CO2 || 0) / 1000;
+        const agb = p.AGBmean || 0;
+        const ndvi = p.NDVI_MEANm || 0;
+        const luasHa = (p.LUAS_AREA || 0) / 10000;
+        const carbonPool = p.CARBONPOOL || 0;
+        const carbonLoss = p.CARBONLOSS || 0;
+        const dnbr = p.dNBR_MEANm || 0;
+        const ctpival = p.CTPIMEAN_m || 0;
+        const nilaiRp = p.CARBON_VAL || 0;
+        document.getElementById('selectedDetail').innerHTML = `
+            <strong>${p.NAMOBJ || 'Desa'}</strong><br>Kecamatan: ${p.WADMKC || '-'}<hr>
+            📐 Luas: ${luasHa.toFixed(2)} ha<br>🌳 AGB: ${agb.toFixed(2)} Mg/ha<br>
+            💧 Carbon Pool: ${carbonPool.toFixed(2)} MgC/ha<br>
+            📦 Total Karbon: ${carbonTon.toFixed(0)} ton C<br>⚠️ Carbon Loss: ${carbonLoss.toFixed(2)} ton C<br>
+            🔥 dNBR: ${dnbr.toFixed(3)}<br>🌿 NDVI: ${ndvi.toFixed(3)}<br>
+            💨 Potensi CO₂e: ${co2Ton.toFixed(0)} ton<br>📊 CTPI: ${ctpival.toFixed(2)} (${p.KELAS_CTPI || '-'})<br>
+            💰 ${formatRupiah(nilaiRp)}
+        `;
+        if (emissionChart) emissionChart.destroy();
+        emissionChart = new Chart(document.getElementById('emissionChart'), {
+            type: 'bar', data: { labels: ['Karbon (ton)', 'CO₂e (ton)'], datasets: [{ data: [carbonTon, co2Ton], backgroundColor: ['#4caf50', '#ff9800'] }] },
+            options: { responsive: true, maintainAspectRatio: true, plugins: { legend: { display: false } }, scales: { y: { ticks: { color: 'white' } }, x: { ticks: { color: 'white' } } } }
+        });
+        if (ndviChart) ndviChart.destroy();
+        ndviChart = new Chart(document.getElementById('ndviChart'), {
+            type: 'bar', data: { labels: ['AGB', 'NDVI'], datasets: [{ data: [agb, ndvi], backgroundColor: ['#2196f3', '#9c27b0'] }] },
+            options: { responsive: true, maintainAspectRatio: true, plugins: { legend: { display: false } }, scales: { y: { ticks: { color: 'white' } }, x: { ticks: { color: 'white' } } } }
+        });
+    }
+
+    function updatePieChartAll(features) {
+        const kelasCount = {};
+        features.forEach(f => {
+            let k = f.properties.KELAS_CTPI || "TIDAK BERPOTENSI";
+            kelasCount[k] = (kelasCount[k] || 0) + 1;
+        });
+        const labels = Object.keys(kelasCount);
+        const data = Object.values(kelasCount);
+        const colors = labels.map(l => getColor(l));
+        if (potensiChart) potensiChart.destroy();
+        const ctx = document.getElementById('potensiChart').getContext('2d');
+        potensiChart = new Chart(ctx, {
+            type: 'pie', data: { labels, datasets: [{ data, backgroundColor: colors, borderColor: 'white', borderWidth: 2 }] },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                plugins: {
+                    legend: { position: 'bottom', labels: { color: 'white', font: { size: 10 } } },
+                    tooltip: { callbacks: { label: (ctx) => `${ctx.label}: ${ctx.raw} desa (${((ctx.raw / features.length)*100).toFixed(1)}%)` } }
+                }
+            }
+        });
+    }
+
+    // ==================== DATA CADANGAN (5 desa dengan kelas berbeda) ====================
+    const fallbackData = {
+        "type": "FeatureCollection",
+        "features": [
+            {"type":"Feature","properties":{"NAMOBJ":"DONOMULYO","WADMKC":"MALANG","LUAS_AREA":18873.248,"TOTAL_CARB":3104799.345,"TOTAL_CO2":11394613.59,"AGBmean":0.69318799404392,"NDVI_MEANm":0.829403939084208,"KELAS_CTPI":"CUKUP BERPOTENSI","CARBONPOOL":0.913933057745785,"CARBONLOSS":0.754029227021864,"dNBR_MEANm":0.770496694015838,"CTPIMEAN_m":0.502129512706617,"CARBON_VAL":34183840788},"geometry":{"type":"Polygon","coordinates":[[[112.579,-7.981],[112.580,-7.982],[112.581,-7.983],[112.582,-7.982],[112.579,-7.981]]]}},
+            {"type":"Feature","properties":{"NAMOBJ":"WONOAGUNG","WADMKC":"KASEMBON","LUAS_AREA":18873.248,"TOTAL_CARB":3104799.345,"TOTAL_CO2":11394613.59,"AGBmean":0.773072923304015,"NDVI_MEANm":0.872333712999624,"KELAS_CTPI":"SANGAT BERPOTENSI","CARBONPOOL":0.883702360268337,"CARBONLOSS":0.82287070600439,"dNBR_MEANm":0.89421296077594,"CTPIMEAN_m":0.583064254761541,"CARBON_VAL":34183840788},"geometry":{"type":"Polygon","coordinates":[[[112.590,-7.970],[112.591,-7.971],[112.592,-7.972],[112.590,-7.970]]]}},
+            {"type":"Feature","properties":{"NAMOBJ":"PAGEDANGAN","WADMKC":"TUREN","LUAS_AREA":6501.574,"TOTAL_CARB":1034182.132,"TOTAL_CO2":3795448.424,"AGBmean":0.63088941802666,"NDVI_MEANm":0.795996735112861,"KELAS_CTPI":"TIDAK BERPOTENSI","CARBONPOOL":0.572619322899679,"CARBONLOSS":0.762350884640215,"dNBR_MEANm":0.85563884492472,"CTPIMEAN_m":0.431265226221098,"CARBON_VAL":11386345272},"geometry":{"type":"Polygon","coordinates":[[[112.545,-8.002],[112.550,-8.001],[112.552,-8.005],[112.546,-8.007],[112.545,-8.002]]]}},
+            {"type":"Feature","properties":{"NAMOBJ":"JOMBOK","WADMKC":"NGANTANG","LUAS_AREA":6640.304,"TOTAL_CARB":684425.947,"TOTAL_CO2":2511843.225,"AGBmean":0.809769822274332,"NDVI_MEANm":0.890287736029942,"KELAS_CTPI":"BERPOTENSI","CARBONPOOL":0.876638541333119,"CARBONLOSS":0.79200672299854,"dNBR_MEANm":0.879908062335663,"CTPIMEAN_m":0.566739811126529,"CARBON_VAL":75355296750},"geometry":{"type":"Polygon","coordinates":[[[112.567,-7.994],[112.572,-7.993],[112.574,-7.997],[112.569,-7.999],[112.567,-7.994]]]}},
+            {"type":"Feature","properties":{"NAMOBJ":"BATURETNO","WADMKC":"DAMPIT","LUAS_AREA":12910.606,"TOTAL_CARB":2037228.266,"TOTAL_CO2":7476627.736,"AGBmean":0.724236460388753,"NDVI_MEANm":0.846130311674062,"KELAS_CTPI":"CUKUP BERPOTENSI","CARBONPOOL":0.868537505464753,"CARBONLOSS":0.743170996599434,"dNBR_MEANm":0.811022506563139,"CTPIMEAN_m":0.517067556948641,"CARBON_VAL":22429883208},"geometry":{"type":"Polygon","coordinates":[[[112.512,-8.010],[112.517,-8.009],[112.518,-8.013],[112.513,-8.015],[112.512,-8.010]]]}}
+        ]
+    };
+
+    function initMapAndData() {
+        map = L.map('map').setView([-8.0, 112.6], 9);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+            attribution: '© CartoDB', subdomains: 'abcd'
+        }).addTo(map);
+
+        fetch('Percobaan Webgis Tubes Aseli.geojson')
+            .then(res => { if (!res.ok) throw new Error('File tidak ditemukan'); return res.json(); })
+            .then(data => {
+                geoJsonData = data;
+                console.log(`✅ Loaded ${geoJsonData.features.length} features from file.`);
+                geoJsonData.features.forEach(f => f.geometry = reprojectGeometry(f.geometry));
+                addToMap(geoJsonData);
+            })
+            .catch(err => {
+                console.warn('File GeoJSON tidak ditemukan, menggunakan data cadangan.', err);
+                geoJsonData = fallbackData;
+                addToMap(geoJsonData);
+                alert('⚠️ File GeoJSON asli tidak ditemukan. Menggunakan data contoh (5 desa).\nPastikan file "Percobaan Webgis Tubes Aseli.geojson" ada di folder yang sama.');
+            });
+    }
+
+    function addToMap(data) {
+        const layer = L.geoJSON(data, {
+            style: (f) => ({ fillColor: getColor(f.properties.KELAS_CTPI), weight: 2, opacity: 0.7, color: '#fff', fillOpacity: 0.6 }),
+            onEachFeature: (f, layer) => {
+                layer.on('click', () => updateCharts(f));
+                layer.bindPopup(`<b>${f.properties.NAMOBJ}</b><br>Potensi: ${f.properties.KELAS_CTPI}<br>Klik untuk detail`);
+            }
+        }).addTo(map);
+        map.fitBounds(layer.getBounds());
+        updatePieChartAll(data.features);
+        if (data.features.length) updateCharts(data.features[0]);
+    }
+
+    analyzeBtn.onclick = () => {
+        if (!currentFeature) return;
+        const p = currentFeature.properties;
+        const carbonTon = (p.TOTAL_CARB || 0) / 1000;
+        const ndvi = p.NDVI_MEANm || 0;
+        const potensi = p.KELAS_CTPI || 'Tidak';
+        let saran = '';
+        if (carbonTon > 1000) saran += '✅ Stok karbon sangat tinggi. ';
+        else if (carbonTon > 500) saran += '✅ Stok karbon sedang. ';
+        else saran += '⚠️ Stok karbon rendah. ';
+        if (ndvi > 0.7) saran += '🌿 Vegetasi sehat. ';
+        else saran += '🍂 Vegetasi perlu perbaikan. ';
+        saran += potensi.includes('BERPOTENSI') ? 
+            '💡 Desa ini LAYAK untuk proyek perdagangan karbon.' : 
+            '💡 Perlu peningkatan tutupan lahan (reboisasi/agroforestri).';
+        analysisDiv.innerHTML = `<strong>📈 Rekomendasi ${p.NAMOBJ}</strong><br>${saran}`;
+        analysisDiv.style.display = 'block';
+    };
+
+    window.onload = initMapAndData;
+</script>
+</body>
+</html>
